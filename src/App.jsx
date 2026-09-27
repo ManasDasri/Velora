@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import MetricCard from "./components/MetricCard";
 import PathFanChart from "./components/PathFanChart";
 import DistributionHistogram from "./components/DistributionHistogram";
@@ -91,13 +91,13 @@ export default function App() {
     }
   };
 
-  const isDemoMode = useMemo(
-    () =>
-      !import.meta.env.VITE_TWELVE_DATA_API_KEY ||
-      !import.meta.env.VITE_FINNHUB_API_KEY ||
-      !import.meta.env.VITE_GROQ_API_KEY,
-    [],
-  );
+  const [isDemoMode, setIsDemoMode] = useState(false);
+  useEffect(() => {
+    fetch("/api/status")
+      .then((r) => r.json())
+      .then((d) => setIsDemoMode(!d.live))
+      .catch(() => setIsDemoMode(true));
+  }, []);
 
   const matrix = state.result?.matrix ?? [];
   const metrics = state.result?.metrics;
