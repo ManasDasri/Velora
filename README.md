@@ -29,16 +29,18 @@ Velora is an AI-powered stochastic market forecasting platform built with React 
    cp .env.example .env
    ```
 
-3. Add API keys in `.env`:
+3. Add API keys in `.env` (and in Vercel → Project → Settings → Environment Variables for production):
 
-   - `VITE_TWELVE_DATA_API_KEY`
-   - `VITE_FINNHUB_API_KEY`
-   - `VITE_GROQ_API_KEY`
+   - `TWELVE_DATA_API_KEY`
+   - `FINNHUB_API_KEY`
+   - `GROQ_API_KEY`
 
-4. Run:
+   The keys are only read by the serverless functions in `api/`, so they never ship in the browser bundle. Don't prefix them with `VITE_` — Vite embeds `VITE_*` variables in the public JavaScript.
+
+4. Run (serves the frontend and the `api/` functions together):
 
    ```bash
-   npm run dev
+   npx vercel dev
    ```
 
 If any key is missing, Velora automatically runs in demo mode with synthetic data and fallback sentiment.
