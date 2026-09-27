@@ -16,10 +16,9 @@ export default async function handler(req, res) {
 You are a quantitative financial sentiment system.
 Analyze the news headlines for ${symbol} and return STRICT JSON:
 {
-  "sentimentScore": number between -1 and 1,
-  "volatilityFactor": number between 0.7 and 1.5,
-  "driftFactor": number between 0.7 and 1.5,
-  "narrative": "max 40 words"
+  "sentimentScore": number between -1 (very bearish) and 1 (very bullish),
+  "volatilityFactor": number between 0.7 and 1.5 (how much more or less uncertain the next month looks than usual),
+  "narrative": "max 40 words, plain English, no hype"
 }
 
 Headlines:
@@ -38,7 +37,9 @@ ${lines.map((line, i) => `${i + 1}. ${line}`).join('\n')}
     }),
   });
   if (!data) return;
-  const content = data.choices?.[0]?.message?.content;
-  if (!content) return res.status(502).json({ error: 'Groq response did not include content.' });
-  res.status(200).json(JSON.parse(content));
+  try {
+    res.status(200).json(JSON.parse(data.choices?.[0]?.message?.content));
+  } catch {
+    res.status(502).json({ error: 'Groq returned malformed JSON.' });
+  }
 }

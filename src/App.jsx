@@ -1,352 +1,313 @@
-import { useEffect, useState } from "react";
-import MetricCard from "./components/MetricCard";
-import PathFanChart from "./components/PathFanChart";
-import DistributionHistogram from "./components/DistributionHistogram";
-import StateHeatmap from "./components/StateHeatmap";
-import IndicatorPanel from "./components/IndicatorPanel";
-import ProbabilityConeTable from "./components/ProbabilityConeTable";
-import { fetchHeadlinePack, fetchMarketSnapshot, fetchOHLCV } from "./services/marketDataService";
+import { useEffect, useMemo, useRef, useState } from "react";
+import FanChart from "./components/FanChart";
+import Distribution from "./components/Distribution";
+import Regimes from "./components/Regimes";
+import { fetchMarketData } from "./services/marketDataService";
 import { synthesizeSentiment } from "./services/groqService";
-import { formatMoney, formatPct, formatSignedPct } from "./utils/format";
+import { formatChange, formatCompact, formatMoney, formatPct } from "./utils/format";
 import { maxDrawdown, realizedVolatility, rsi, sma, volumeRegime } from "./utils/indicators";
 import { runSimulation } from "./utils/simulation";
 
-const matrixRows = ["Bear", "Neutral", "Bull"];
-const scenarios = {
-  base: { label: "Base", driftBias: 1, volatilityBias: 1, shockMultiplier: 1 },
-  riskOn: { label: "Risk-On", driftBias: 1.12, volatilityBias: 0.88, shockMultiplier: 0.85 },
-  riskOff: { label: "Risk-Off", driftBias: 0.9, volatilityBias: 1.2, shockMultiplier: 1.2 },
-  blackSwan: { label: "Black Swan", driftBias: 0.74, volatilityBias: 1.7, shockMultiplier: 2.2 },
+const HORIZONS = [10, 30, 60, 90];
+const PATHS = 2000;
+// tilt: extra daily drift in sigma units. vol: volatility multiplier. jump: jump-frequency multiplier.
+const SCENARIOS = {
+  base: { label: "Base", tilt: 0, vol: 1, jump: 1, hint: "History as it is" },
+  riskOn: { label: "Risk-on", tilt: 0.03, vol: 0.9, jump: 0.7, hint: "Stronger drift, calmer days" },
+  riskOff: { label: "Risk-off", tilt: -0.03, vol: 1.2, jump: 1.3, hint: "Weaker drift, choppier days" },
+  stress: { label: "Stress", tilt: -0.08, vol: 1.6, jump: 2.5, hint: "Sell-off with frequent jumps" },
 };
+const SENTIMENT_TILT = 0.04; // a fully bullish headline read adds 0.04σ of drift per day
+
+function Segmented({ name, options, value, onChange }) {
+  return (
+    <div role="radiogroup" aria-label={name} className="inline-flex rounded-md border border-rule bg-surface p-0.5">
+      {options.map(([key, label, hint]) => (
+        <label key={key} title={hint} className="cursor-pointer">
+          <input type="radio" name={name} value={key} checked={value === key} onChange={() => onChange(key)} className="peer sr-only" />
+          <span className="block whitespace-nowrap rounded px-2.5 py-1.5 text-sm sm:px-3 text-muted transition-colors peer-checked:bg-ink peer-checked:text-paper peer-focus-visible:ring-2 peer-focus-visible:ring-fan">
+            {label}
+          </span>
+        </label>
+      ))}
+    </div>
+  );
+}
+
+function Figure({ label, value, note, title }) {
+  return (
+    <div title={title}>
+      <dt className="text-sm text-muted">{label}</dt>
+      <dd className="mt-1 text-xl font-medium text-ink">{value}</dd>
+      {note && <dd className="text-sm text-muted">{note}</dd>}
+    </div>
+  );
+}
+
+function Section({ title, children }) {
+  return (
+    <section className="border-t border-rule py-10">
+      <h2 className="mb-6 font-serif text-3xl text-ink">{title}</h2>
+      {children}
+    </section>
+  );
+}
 
 export default function App() {
-  const [symbol, setSymbol] = useState("AAPL");
-  const [horizonDays, setHorizonDays] = useState(30);
-  const [paths, setPaths] = useState(1000);
-  const [shockChance, setShockChance] = useState(3);
-  const [interval, setInterval] = useState("1day");
-  const [lookback, setLookback] = useState(320);
+  const [input, setInput] = useState("AAPL");
+  const [data, setData] = useState(null);
+  const [sentiment, setSentiment] = useState({ status: "idle" });
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [horizon, setHorizon] = useState(30);
   const [scenarioKey, setScenarioKey] = useState("base");
-  const [state, setState] = useState({
-    loading: false,
-    error: "",
-    bars: [],
-    result: null,
-    sentiment: null,
-    headlines: [],
-    snapshot: { changePercent: 0, dayHigh: null, dayLow: null, marketCap: null, peTTM: null },
-    indicators: { sma20: null, sma50: null, rsi14: null, realizedVol30: null, maxDrawdown: 0, volumeRegime: null },
-  });
+  const [jumpPct, setJumpPct] = useState(1);
+  const request = useRef(0);
 
-  const runForecast = async () => {
-    setState((prev) => ({ ...prev, loading: true, error: "" }));
+  const load = async (raw) => {
+    const symbol = raw.trim().toUpperCase();
+    if (!symbol) return;
+    const id = ++request.current;
+    setLoading(true);
+    setError("");
     try {
-      const [bars, headlines, snapshot] = await Promise.all([
-        fetchOHLCV(symbol, interval, lookback),
-        fetchHeadlinePack(symbol),
-        fetchMarketSnapshot(symbol),
-      ]);
-      const sentiment = await synthesizeSentiment(symbol, headlines);
-      const closes = bars.map((bar) => bar.close);
-      const scenario = scenarios[scenarioKey];
-      const result = runSimulation({
-        closes,
-        horizonDays,
-        paths,
-        shockChance: (shockChance / 100) * scenario.shockMultiplier,
-        sentiment: sentiment.sentimentScore * sentiment.driftFactor,
-        driftBias: scenario.driftBias,
-        volatilityBias: scenario.volatilityBias * sentiment.volatilityFactor,
-      });
-
-      result.metrics.expected *= sentiment.driftFactor;
-      result.metrics.p90 *= sentiment.driftFactor;
-      result.metrics.p10 /= sentiment.volatilityFactor;
-
-      const indicators = {
-        sma20: sma(closes, 20),
-        sma50: sma(closes, 50),
-        rsi14: rsi(closes, 14),
-        realizedVol30: realizedVolatility(closes, 30),
-        maxDrawdown: maxDrawdown(closes),
-        volumeRegime: volumeRegime(bars),
-      };
-
-      setState({
-        loading: false,
-        error: "",
-        bars,
-        result,
-        sentiment,
-        headlines,
-        snapshot,
-        indicators,
-      });
-    } catch (error) {
-      setState((prev) => ({
-        ...prev,
-        loading: false,
-        error: error.message || "Failed to compute forecast.",
-      }));
+      const next = await fetchMarketData(symbol);
+      if (id !== request.current) return;
+      setData({ ...next, symbol });
+      setSentiment({ status: next.headlines.length ? "loading" : "idle" });
+      // The headline read arrives after the chart; the forecast re-runs when it lands.
+      synthesizeSentiment(symbol, next.headlines)
+        .then((s) => id === request.current && setSentiment(s ? { status: "done", ...s } : { status: "idle" }))
+        .catch((e) => id === request.current && setSentiment({ status: "error", message: e.message }));
+    } catch (e) {
+      if (id === request.current) setError(`Couldn't load ${symbol}. ${e.message}`);
+    } finally {
+      if (id === request.current) setLoading(false);
     }
   };
 
-  const [isDemoMode, setIsDemoMode] = useState(false);
   useEffect(() => {
-    fetch("/api/status")
-      .then((r) => r.json())
-      .then((d) => setIsDemoMode(!d.live))
-      .catch(() => setIsDemoMode(true));
+    load("AAPL");
   }, []);
 
-  const matrix = state.result?.matrix ?? [];
-  const metrics = state.result?.metrics;
-  const currentPrice = state.bars.at(-1)?.close;
-  const activeScenario = scenarios[scenarioKey];
-  const tickerItems = state.headlines.length
-    ? [...state.headlines, ...state.headlines]
-    : ["Run a forecast to stream contextual headlines", "Velora sentiment pulse awaits", "Regime-aware simulation ready"];
+  const closes = useMemo(() => data?.bars.map((b) => b.close) ?? [], [data]);
+  const scenario = SCENARIOS[scenarioKey];
+  const read = sentiment.status === "done" ? sentiment : null;
+
+  const result = useMemo(() => {
+    if (closes.length < 30) return null;
+    return runSimulation({
+      closes,
+      horizon,
+      paths: PATHS,
+      driftTilt: scenario.tilt + SENTIMENT_TILT * (read?.score ?? 0),
+      volScale: scenario.vol * (read?.volatilityFactor ?? 1),
+      jumpChance: (jumpPct / 100) * scenario.jump,
+    });
+  }, [closes, horizon, scenario, jumpPct, read]);
+
+  const stats = useMemo(
+    () =>
+      data && {
+        vol30: realizedVolatility(closes, 30),
+        rsi14: rsi(closes, 14),
+        sma20: sma(closes, 20),
+        sma50: sma(closes, 50),
+        drawdown: maxDrawdown(closes),
+        volume: volumeRegime(data.bars),
+      },
+    [data, closes],
+  );
+
+  const m = result?.metrics;
+  const snap = data?.snapshot;
 
   return (
-    <main className="app-shell min-h-screen">
-      <div className="aurora-layer" />
-      <div className="noise-mask" />
-
-      <div className="reactbits-grid mx-auto max-w-7xl px-4 py-6 md:px-8">
-        <header className="mb-5 grid gap-4 lg:grid-cols-[1fr_auto]">
-          <div className="glass p-5">
-            <p className="inline-flex rounded-full border border-sky-400/40 bg-sky-400/10 px-3 py-1 text-xs font-semibold tracking-[0.14em] text-sky-200">
-              REACTBITS-STYLE UI UPGRADE
+    <div className="min-h-screen bg-paper text-ink">
+      <header className="border-b border-rule bg-surface">
+        <div className="mx-auto flex max-w-6xl flex-wrap items-center gap-x-8 gap-y-3 px-4 py-3 sm:px-6">
+          <p className="font-serif text-2xl leading-none">Velora</p>
+          <form
+            className="flex gap-2"
+            onSubmit={(e) => {
+              e.preventDefault();
+              load(input);
+            }}
+          >
+            <label htmlFor="ticker" className="sr-only">
+              Ticker symbol
+            </label>
+            <input
+              id="ticker"
+              value={input}
+              onChange={(e) => setInput(e.target.value.toUpperCase())}
+              maxLength={15}
+              autoComplete="off"
+              spellCheck="false"
+              className="w-28 rounded-md border border-rule bg-paper px-3 py-1.5 text-sm font-medium uppercase outline-none focus-visible:border-fan focus-visible:ring-2 focus-visible:ring-fan/30"
+            />
+            <button disabled={loading} className="rounded-md bg-ink px-4 py-1.5 text-sm font-medium text-paper transition-opacity hover:opacity-90 disabled:opacity-50">
+              {loading ? "Loading…" : "Forecast"}
+            </button>
+          </form>
+          {data && (
+            <p className="ml-auto text-sm text-muted">
+              <span className="font-medium text-ink">{data.symbol}</span> last close {formatMoney(closes.at(-1))}
+              {Number.isFinite(snap?.changePercent) && (
+                <span className={snap.changePercent >= 0 ? " text-up" : " text-down"}>
+                  {" "}
+                  {snap.changePercent >= 0 ? "+" : "−"}
+                  {Math.abs(snap.changePercent).toFixed(2)}% today
+                </span>
+              )}
             </p>
-            <h1 className="mt-3 text-4xl font-black tracking-tight text-white md:text-5xl">Velora Quantum Desk</h1>
-            <p className="mt-2 max-w-3xl text-sm text-slate-200 md:text-base">
-              AI-driven stochastic forecasting with cinematic controls, live narrative context, and regime-aware risk analytics.
-              {isDemoMode ? " Demo mode is active until API keys are configured." : ""}
-            </p>
-          </div>
+          )}
+        </div>
+      </header>
 
-          <div className="gradient-outline self-stretch">
-            <div className="glass flex h-full min-w-[280px] items-center justify-center p-5 text-center">
-              <div>
-                <p className="text-xs uppercase tracking-[0.16em] text-slate-400">Current Symbol</p>
-                <p className="mt-2 text-4xl font-extrabold text-sky-300">{symbol}</p>
-                <p className="mt-2 text-xs text-slate-300">Last close: {currentPrice ? formatMoney(currentPrice) : "—"}</p>
-                <p className="mt-1 text-xs text-slate-300">Scenario: {activeScenario.label}</p>
-              </div>
-            </div>
-          </div>
-        </header>
+      {data?.demo && (
+        <p className="bg-ink px-4 py-2 text-center text-sm text-paper/85">
+          Demo mode: these are synthetic prices, not real {data.symbol} data. Add the API keys in Vercel to use live market data.
+        </p>
+      )}
 
-        <section className="gradient-outline mb-5">
-          <div className="glass p-4">
-            <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-7">
-              <label className="text-xs text-slate-300">
-                Ticker Symbol
-                <input
-                  value={symbol}
-                  onChange={(event) => setSymbol(event.target.value.toUpperCase())}
-                  className="rb-input w-full"
-                  placeholder="AAPL"
-                />
-              </label>
-              <label className="text-xs text-slate-300">
-                Interval
-                <select value={interval} onChange={(event) => setInterval(event.target.value)} className="rb-input w-full">
-                  <option value="1day">1 Day</option>
-                  <option value="4h">4 Hour</option>
-                  <option value="1h">1 Hour</option>
-                </select>
-              </label>
-              <label className="text-xs text-slate-300">
-                Lookback Bars
-                <select value={lookback} onChange={(event) => setLookback(Number(event.target.value))} className="rb-input w-full">
-                  <option value={180}>180</option>
-                  <option value={240}>240</option>
-                  <option value={320}>320</option>
-                  <option value={500}>500</option>
-                </select>
-              </label>
-              <label className="text-xs text-slate-300">
-                Forecast Horizon
-                <input
-                  type="number"
-                  min={5}
-                  max={120}
-                  value={horizonDays}
-                  onChange={(event) => setHorizonDays(Number(event.target.value))}
-                  className="rb-input w-full"
-                />
-              </label>
-              <label className="text-xs text-slate-300">
-                Monte Carlo Paths
-                <input
-                  type="number"
-                  min={100}
-                  max={1000}
-                  step={100}
-                  value={paths}
-                  onChange={(event) => setPaths(Math.min(1000, Number(event.target.value)))}
-                  className="rb-input w-full"
-                />
-              </label>
-              <label className="text-xs text-slate-300">
-                Shock Intensity ({shockChance}%)
-                <input
-                  type="range"
-                  min={0}
-                  max={30}
-                  value={shockChance}
-                  onChange={(event) => setShockChance(Number(event.target.value))}
-                  className="mt-3 w-full accent-sky-400"
-                />
-              </label>
-              <button onClick={runForecast} disabled={state.loading} className="shiny-button mt-5 px-4 py-2 text-sm">
-                {state.loading ? "Synthesizing Forecast..." : "Launch Forecast"}
-              </button>
-            </div>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {Object.entries(scenarios).map(([key, scenario]) => (
-                <button
-                  key={key}
-                  type="button"
-                  onClick={() => setScenarioKey(key)}
-                  className={`rounded-full border px-3 py-1 text-xs transition ${
-                    scenarioKey === key
-                      ? "border-sky-300/70 bg-sky-400/20 text-sky-100"
-                      : "border-slate-700/70 bg-slate-900/70 text-slate-300 hover:bg-slate-800/80"
-                  }`}
-                >
-                  {scenario.label}
-                </button>
-              ))}
-            </div>
-          </div>
-        </section>
+      <main className="mx-auto max-w-6xl px-4 sm:px-6">
+        {error && <p className="mt-6 rounded-md border border-down/40 bg-down/5 px-4 py-3 text-sm text-down">{error}</p>}
 
-        {state.error && <p className="mb-4 rounded-xl border border-rose-400/40 bg-rose-950/40 p-3 text-sm text-rose-200">{state.error}</p>}
-
-        {metrics && (
+        {!result ? (
+          <p className="py-24 font-serif text-3xl text-muted">{loading ? `Simulating ${input}…` : "Enter a ticker to see its forecast."}</p>
+        ) : (
           <>
-            <section className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-              <MetricCard label="Expected Terminal" value={formatMoney(metrics.expected)} tone="positive" />
-              <MetricCard label="Probability Up" value={formatPct(metrics.upProbability)} tone={metrics.upProbability > 0.5 ? "positive" : "negative"} />
-              <MetricCard label="VaR (95%)" value={formatMoney(metrics.var95)} tone="negative" />
-              <MetricCard label="CVaR (95%)" value={formatMoney(metrics.cvar95)} tone="negative" />
-              <MetricCard
-                label="Daily Move"
-                value={formatSignedPct(state.snapshot.changePercent)}
-                tone={state.snapshot.changePercent >= 0 ? "positive" : "negative"}
-              />
+            <section className="pb-6 pt-10 sm:pt-14">
+              <h1 className="max-w-4xl font-serif text-4xl leading-[1.08] tracking-tight sm:text-6xl">
+                In {horizon} trading days, {data.symbol} ends above today’s {formatMoney(result.spot)} in {formatPct(m.up)} of{" "}
+                {PATHS.toLocaleString()} simulated paths.
+              </h1>
+
+              <dl className="mt-8 grid grid-cols-2 gap-x-8 gap-y-5 md:grid-cols-4">
+                <Figure label="Median outcome" value={formatMoney(m.p50)} note={formatChange(m.p50, result.spot)} />
+                <Figure label="8 in 10 paths land between" value={`${formatMoney(m.p10)} – ${formatMoney(m.p90)}`} note={`${formatChange(m.p10, result.spot)} to ${formatChange(m.p90, result.spot)}`} />
+                <Figure label="1 in 20 paths ends below" value={formatMoney(m.var95)} note={formatChange(m.var95, result.spot)} title="Value at risk, 95%" />
+                <Figure label="Average of those worst paths" value={formatMoney(m.cvar95)} note={formatChange(m.cvar95, result.spot)} title="Conditional value at risk (expected shortfall), 95%" />
+              </dl>
             </section>
 
-            <section className="mt-4 grid gap-4 lg:grid-cols-3">
-              <div className="lg:col-span-2">
-                <PathFanChart paths={state.result.simulations} />
-              </div>
-              <div className="space-y-4">
-                <StateHeatmap occupancy={state.result.stateOccupancy} />
-                <IndicatorPanel indicators={state.indicators} snapshot={state.snapshot} />
-              </div>
+            <section className={`transition-opacity ${loading ? "opacity-50" : ""}`}>
+              <FanChart bars={data.bars} result={result} revealKey={data.symbol + data.bars.length} />
+              <p className="mt-2 text-sm text-muted">
+                Shaded bands hold the middle 50%, 80% and 90% of paths. The line through them is the median. Hover to read any day.
+              </p>
             </section>
 
-            <section className="mt-4 grid gap-4 lg:grid-cols-3">
-              <div className="lg:col-span-2">
-                <DistributionHistogram values={state.result.finalPrices} />
+            <section className="flex flex-wrap items-end gap-x-8 gap-y-5 py-8">
+              <div>
+                <p className="mb-2 text-sm text-muted">Horizon</p>
+                <Segmented name="Horizon" value={String(horizon)} onChange={(v) => setHorizon(Number(v))} options={HORIZONS.map((h) => [String(h), `${h}d`, `${h} trading days`])} />
               </div>
-              <div className="gradient-outline">
-                <div className="glass p-4">
-                  <p className="mb-2 text-sm text-slate-300">AI Narrative Pulse</p>
-                  <p className="text-sm leading-relaxed text-slate-100">{state.sentiment?.narrative}</p>
-                  <p className="mt-2 text-xs text-slate-400">
-                    Sentiment {state.sentiment?.sentimentScore?.toFixed(2)} · Vol x
-                    {state.sentiment?.volatilityFactor?.toFixed(2)} · Drift x
-                    {state.sentiment?.driftFactor?.toFixed(2)} · Sim Vol {formatPct(metrics.annualizedVolatility)}
-                  </p>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-300">
-                    <div className="rounded-xl border border-slate-700/70 bg-slate-950/60 p-2">P10: {formatMoney(metrics.p10)}</div>
-                    <div className="rounded-xl border border-slate-700/70 bg-slate-950/60 p-2">P50: {formatMoney(metrics.p50)}</div>
-                    <div className="rounded-xl border border-slate-700/70 bg-slate-950/60 p-2">P90: {formatMoney(metrics.p90)}</div>
-                    <div className="rounded-xl border border-slate-700/70 bg-slate-950/60 p-2">Upside: {formatPct(metrics.upProbability)}</div>
-                  </div>
+              <div>
+                <p className="mb-2 text-sm text-muted">Scenario</p>
+                <Segmented name="Scenario" value={scenarioKey} onChange={setScenarioKey} options={Object.entries(SCENARIOS).map(([k, s]) => [k, s.label, s.hint])} />
+              </div>
+              <label className="min-w-56 flex-1 sm:max-w-xs">
+                <span className="mb-2 flex justify-between text-sm text-muted">
+                  Chance of a jump day <span className="text-ink">{jumpPct}%</span>
+                </span>
+                <input type="range" min={0} max={5} step={0.5} value={jumpPct} onChange={(e) => setJumpPct(Number(e.target.value))} className="w-full accent-fan" />
+              </label>
+              <p className="basis-full text-sm text-muted">{scenario.hint}. Changes re-run all {PATHS.toLocaleString()} paths instantly.</p>
+            </section>
+
+            <Section title="Where the paths end">
+              <div className="grid grid-cols-1 gap-10 lg:grid-cols-[3fr_2fr]">
+                <div>
+                  <Distribution result={result} />
+                  <p className="mt-2 text-sm text-muted">Each bar counts paths ending at that price. Red is below today; the darkest red is the worst 5%.</p>
                 </div>
-              </div>
-            </section>
-
-            <section className="mt-4 grid gap-4 lg:grid-cols-2">
-              <ProbabilityConeTable cone={state.result.cone} />
-              <div className="gradient-outline">
-                <div className="glass overflow-auto p-4">
-                  <p className="mb-2 text-sm text-slate-300">Markov Transition Matrix</p>
-                  <table className="w-full text-sm">
-                    <thead className="text-slate-400">
-                      <tr>
-                        <th className="py-1 text-left">From \ To</th>
-                        <th className="py-1 text-right">Bear</th>
-                        <th className="py-1 text-right">Neutral</th>
-                        <th className="py-1 text-right">Bull</th>
+                <table className="w-full self-start text-sm">
+                  <thead>
+                    <tr className="border-b border-rule text-left text-muted">
+                      <th className="pb-2 font-normal">Days ahead</th>
+                      <th className="pb-2 text-right font-normal">Median</th>
+                      <th className="pb-2 text-right font-normal">8 in 10 between</th>
+                      <th className="pb-2 text-right font-normal">Above today</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {result.checkpoints.map((c) => (
+                      <tr key={c.day} className="border-b border-rule/60">
+                        <td className="py-2">{c.day}</td>
+                        <td className="py-2 text-right">{formatMoney(c.p50)}</td>
+                        <td className="py-2 text-right text-muted">
+                          {formatMoney(c.p10)} – {formatMoney(c.p90)}
+                        </td>
+                        <td className={`py-2 text-right ${c.up >= 0.5 ? "text-up" : "text-down"}`}>{formatPct(c.up)}</td>
                       </tr>
-                    </thead>
-                    <tbody>
-                      {matrix.map((row, idx) => (
-                        <tr key={matrixRows[idx]} className="border-t border-slate-700/70">
-                          <td className="py-1 text-slate-300">{matrixRows[idx]}</td>
-                          {row.map((value, valueIdx) => (
-                            <td key={`${idx}-${valueIdx}`} className="py-1 text-right text-slate-100">
-                              {(value * 100).toFixed(1)}%
-                            </td>
-                          ))}
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                    ))}
+                  </tbody>
+                </table>
               </div>
-            </section>
+            </Section>
 
-            <section className="mt-4 grid gap-4 lg:grid-cols-2">
-              <div className="gradient-outline">
-                <div className="glass p-4">
-                  <p className="mb-2 text-sm text-slate-300">Headline Context</p>
-                  <div className="ticker rounded-xl border border-slate-700/60 bg-slate-950/60 py-2">
-                    <div className="ticker-track">
-                      {tickerItems.map((line, idx) => (
-                        <span key={`${line}-${idx}`} className="ticker-item">
-                          {line}
-                        </span>
-                      ))}
-                    </div>
-                  </div>
-                  <ul className="mt-3 space-y-2">
-                    {state.headlines.slice(0, 6).map((line) => (
-                      <li key={line} className="headline-chip">
-                        {line}
+            <Section title="What the headlines say">
+              <div className="grid grid-cols-1 gap-10 lg:grid-cols-[2fr_3fr]">
+                <div>
+                  {sentiment.status === "loading" && <p className="text-muted">Reading this week’s headlines…</p>}
+                  {sentiment.status === "error" && <p className="text-down">{sentiment.message}</p>}
+                  {sentiment.status === "idle" && (
+                    <p className="text-muted">{data.demo ? "Headlines aren’t available in demo mode, so the forecast uses price history only." : "No headlines this week, so the forecast uses price history only."}</p>
+                  )}
+                  {read && (
+                    <>
+                      <p className="font-serif text-2xl leading-snug">{read.narrative}</p>
+                      <p className="mt-4 text-sm text-muted">
+                        Read as {read.score > 0.15 ? "bullish" : read.score < -0.15 ? "bearish" : "neutral"} ({read.score.toFixed(2)}). The forecast{" "}
+                        {Math.abs(read.score) < 0.05 ? "keeps its drift" : `leans ${read.score > 0 ? "up" : "down"}`} and scales volatility by ×{read.volatilityFactor.toFixed(2)}.
+                      </p>
+                    </>
+                  )}
+                </div>
+                {data.headlines.length > 0 && (
+                  <ul className="divide-y divide-rule border-y border-rule text-sm">
+                    {data.headlines.map((h, i) => (
+                      <li key={i} className="py-3">
+                        {h}
                       </li>
                     ))}
                   </ul>
-                </div>
+                )}
               </div>
+            </Section>
 
-              <div className="gradient-outline">
-                <div className="glass p-4">
-                  <p className="mb-2 text-sm text-slate-300">Scenario Intelligence</p>
-                  <p className="text-sm text-slate-200">
-                    Scenario presets now alter drift, volatility, and shock rate simultaneously. Use Risk-Off and Black Swan to rehearse
-                    downside tails before entering size.
-                  </p>
-                  <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-300">
-                    <div className="rounded-xl border border-slate-700/70 bg-slate-950/60 p-2">
-                      Bars loaded: {state.bars.length}
-                    </div>
-                    <div className="rounded-xl border border-slate-700/70 bg-slate-950/60 p-2">Interval: {interval}</div>
-                    <div className="rounded-xl border border-slate-700/70 bg-slate-950/60 p-2">Lookback: {lookback}</div>
-                    <div className="rounded-xl border border-slate-700/70 bg-slate-950/60 p-2">Scenario: {activeScenario.label}</div>
-                  </div>
-                </div>
-              </div>
-            </section>
+            <Section title="Day-to-day patterns">
+              <Regimes result={result} />
+            </Section>
+
+            <Section title="Recent trading">
+              <dl className="grid grid-cols-2 gap-x-8 gap-y-6 sm:grid-cols-4">
+                <Figure label="Volatility, last 30 days" value={formatPct(stats.vol30, 1)} note="annualised" />
+                <Figure label="RSI (14 days)" value={stats.rsi14?.toFixed(0) ?? "—"} note={stats.rsi14 > 70 ? "overbought" : stats.rsi14 < 30 ? "oversold" : "neutral range"} />
+                <Figure label="20 / 50-day average" value={`${formatMoney(stats.sma20)} / ${formatMoney(stats.sma50)}`} note={stats.sma20 > stats.sma50 ? "short-term trend up" : "short-term trend down"} />
+                <Figure label="Largest drop from a peak" value={formatPct(stats.drawdown, 1)} note={`over ${closes.length} sessions`} />
+                <Figure label="Volume vs 30-day average" value={stats.volume ? `${stats.volume.toFixed(2)}×` : "—"} note="last 5 sessions" />
+                <Figure label="Market cap" value={snap?.marketCap ? `$${formatCompact(snap.marketCap * 1e6)}` : "—"} />
+                <Figure label="P/E, trailing 12 months" value={snap?.peTTM ? snap.peTTM.toFixed(1) : "—"} />
+                <Figure label="Today’s range" value={snap?.dayLow ? `${formatMoney(snap.dayLow)} – ${formatMoney(snap.dayHigh)}` : "—"} />
+              </dl>
+            </Section>
           </>
         )}
-      </div>
-    </main>
+      </main>
+
+      <footer className="border-t border-rule">
+        <div className="mx-auto grid max-w-6xl gap-6 px-4 py-10 text-sm text-muted sm:px-6 md:grid-cols-[2fr_1fr]">
+          <p className="max-w-prose">
+            Velora estimates daily return and volatility from about two years of closing prices, then simulates {PATHS.toLocaleString()} futures. Each simulated day
+            moves between down, flat and up states using the transition odds seen in history, with rare jump days added on top. An AI read of the week’s headlines
+            can nudge the drift and volatility. The result is a spread of possibilities, not a prediction.
+          </p>
+          <p>Not investment advice. Past behaviour of a price is a weak guide to its future.</p>
+        </div>
+      </footer>
+    </div>
   );
 }

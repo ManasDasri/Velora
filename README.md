@@ -4,16 +4,14 @@ Velora is an AI-powered stochastic market forecasting platform built with React 
 
 ## Core capabilities
 
-- Live OHLCV ingestion from Twelve Data and company headline context from Finnhub
-- Extra live data pack: quote change %, day range, market cap, and P/E (TTM) from Finnhub
-- Monte Carlo engine with regime-switching volatility and jump-shock stress events
-- Groq LLaMA 3.3-70B contextual sentiment synthesis to influence drift/vol assumptions
-- Native HTML5 Canvas fan chart and histogram rendering (no charting library dependency)
-- Risk analytics: expected terminal price, upside probability, VaR(95%), CVaR(95%)
-- Regime occupancy heatmap and Markov transition matrix diagnostics
-- Scenario presets (Base, Risk-On, Risk-Off, Black Swan) that jointly reweight drift/vol/shock assumptions
-- Technical indicator panel: SMA20/50, RSI(14), realized volatility, max drawdown, volume regime
-- Multi-horizon probability cone table across forecast checkpoints
+- A plain-language answer up front: how often the stock ends above today's price across 2,000 simulated paths, with median, 80% range, VaR(95%) and CVaR(95%)
+- Price history flowing into a probability fan (50/80/90% bands, median, sample paths) with hover readouts for any day
+- Monte Carlo engine on daily log returns with a 3-state Markov chain (down/flat/up days) and optional jump days; seeded, so results are stable while you adjust controls
+- Horizon (10–90 trading days), scenario presets (Base, Risk-on, Risk-off, Stress) and jump frequency re-run the simulation instantly, without refetching data
+- Live daily prices from Twelve Data, headlines, quote and fundamentals from Finnhub
+- Groq LLaMA 3.3-70B reads the week's headlines; its sentiment nudges drift and volatility (clamped server- and client-side)
+- Terminal distribution, checkpoint table, Markov transition odds, simulated day mix, and recent-trading stats (volatility, RSI, moving averages, drawdown, volume)
+- SVG charts, no charting library
 
 ## Setup
 
@@ -43,4 +41,6 @@ Velora is an AI-powered stochastic market forecasting platform built with React 
    npx vercel dev
    ```
 
-If any key is missing, Velora automatically runs in demo mode with synthetic data and fallback sentiment.
+If the Twelve Data key is missing, Velora runs in demo mode with clearly labelled synthetic prices; missing Finnhub or Groq keys just hide headlines and the AI read.
+
+Check the simulation engine with `npm run check`.

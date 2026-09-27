@@ -1,66 +1,50 @@
 // All keyed requests go through our serverless functions in /api, which hold
 // the API keys. A 503 { demo: true } means no key is configured: use demo data.
-const api = async (path, fallback) => {
+const DEMO = Symbol("demo");
+
+const api = async (path) => {
   const response = await fetch(path);
-  if (response.status === 503) return fallback();
+  if (response.status === 503) return DEMO;
   const data = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(data.error || `Request to ${path} failed.`);
+  if (!response.ok) throw new Error(data.error || `Request to ${path} failed (${response.status}).`);
   return data;
 };
 
-const normalizeBar = (bar) => ({
-  close: Number(bar.close),
-  open: Number(bar.open),
-  high: Number(bar.high),
-  low: Number(bar.low),
-  volume: Number(bar.volume),
-  datetime: bar.datetime,
-});
-
-const generateDemoSeries = (symbol) => {
-  const today = new Date();
-  let value = 100 + symbol.length * 11;
-  return Array.from({ length: 240 }, (_, idx) => {
-    const day = new Date(today);
-    day.setDate(today.getDate() - (239 - idx));
-    value *= 1 + (Math.random() - 0.49) * 0.02;
-    return {
-      datetime: day.toISOString(),
-      open: value * (1 - 0.008),
-      high: value * (1 + 0.012),
-      low: value * (1 - 0.014),
-      close: value,
-      volume: 900_000 + Math.floor(Math.random() * 500_000),
-    };
+// Deterministic per symbol, so the demo chart for a ticker is the same on every visit.
+const demoSeries = (symbol, length) => {
+  let seed = [...symbol].reduce((h, c) => Math.imul(h ^ c.charCodeAt(0), 16777619), 2166136261);
+  const rand = () => ((seed = Math.imul(seed ^ (seed >>> 15), 2246822507) >>> 0) / 4294967296);
+  const normal = () => Math.sqrt(-2 * Math.log(rand() || 1e-9)) * Math.cos(2 * Math.PI * rand());
+  const day = new Date();
+  const dates = [];
+  while (dates.length < length) {
+    if (day.getDay() % 6 !== 0) dates.unshift(day.toISOString().slice(0, 10));
+    day.setDate(day.getDate() - 1);
+  }
+  let close = 60 + (Math.abs(seed) % 240);
+  return dates.map((datetime) => {
+    close *= Math.exp(0.0003 + 0.016 * normal());
+    return { datetime, close, volume: 1_000_000 * (0.6 + rand()) };
   });
 };
 
-export const fetchOHLCV = async (symbol, interval = "1day", outputsize = 240) => {
-  const params = new URLSearchParams({ symbol, interval, outputsize: String(outputsize) });
-  const data = await api(`/api/ohlcv?${params}`, () => null);
-  if (!data) {
-    return generateDemoSeries(symbol);
-  }
-  if (!data.values?.length) {
-    throw new Error(data.message || "No OHLCV values returned for this symbol.");
-  }
-  return data.values.reverse().map(normalizeBar);
-};
-
-export const fetchHeadlinePack = async (symbol) => {
-  const headlines = await api(`/api/news?symbol=${encodeURIComponent(symbol)}`, () => [
-    `${symbol} prints strong quarter amid resilient macro backdrop`,
-    `${symbol} analysts highlight efficiency expansion opportunity`,
-    `${symbol} options flow suggests elevated speculative demand`,
+export const fetchMarketData = async (symbol, bars = 500) => {
+  const q = encodeURIComponent(symbol);
+  const [series, headlines, snapshot] = await Promise.all([
+    api(`/api/ohlcv?symbol=${q}&interval=1day&outputsize=${bars}`),
+    api(`/api/news?symbol=${q}`),
+    api(`/api/snapshot?symbol=${q}`),
   ]);
-  return headlines.length ? headlines : [`No major headlines found for ${symbol} this week.`];
-};
 
-export const fetchMarketSnapshot = (symbol) =>
-  api(`/api/snapshot?symbol=${encodeURIComponent(symbol)}`, () => ({
-    changePercent: Number(((Math.random() - 0.5) * 4).toFixed(2)),
-    dayHigh: null,
-    dayLow: null,
-    marketCap: null,
-    peTTM: null,
-  }));
+  const demo = series === DEMO;
+  if (!demo && !series.values?.length) throw new Error(series.message || `No price history found for ${symbol}.`);
+
+  return {
+    demo,
+    bars: demo
+      ? demoSeries(symbol, bars)
+      : series.values.reverse().map((b) => ({ datetime: b.datetime, close: Number(b.close), volume: Number(b.volume) })),
+    headlines: headlines === DEMO ? [] : headlines,
+    snapshot: snapshot === DEMO ? null : snapshot,
+  };
+};
