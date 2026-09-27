@@ -1,18 +1,22 @@
 /** @type {import('tailwindcss').Config} */
 export default {
-  content: ["./index.html", "./src/**/*.{js,ts,jsx,tsx}"],
+  content: ["./index.html", "./src/**/*.{js,jsx}"],
   theme: {
     extend: {
       colors: {
-        velora: {
-          900: "#020617",
-          800: "#0f172a",
-          700: "#1e293b",
-          400: "#38bdf8",
-        },
+        paper: "#F2F4F7", // page
+        surface: "#FFFFFF", // header, tooltips, inputs
+        ink: "#15213B", // text and price history
+        muted: "#5B6679", // secondary text, axes
+        rule: "#D9DEE7", // hairlines and gridlines
+        fan: "#3346D3", // the forecast
+        up: "#17806A",
+        down: "#C73E5A",
+        flat: "#AEB6C4",
       },
-      boxShadow: {
-        neon: "0 0 0 1px rgba(56, 189, 248, 0.25), 0 0 20px rgba(56, 189, 248, 0.15)",
+      fontFamily: {
+        sans: ['"IBM Plex Sans"', "ui-sans-serif", "system-ui", "sans-serif"],
+        serif: ['"Instrument Serif"', "ui-serif", "Georgia", "serif"],
       },
     },
   },
